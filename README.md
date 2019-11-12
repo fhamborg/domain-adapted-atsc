@@ -26,6 +26,14 @@ cat data/transformed/copewe10m.txt | sed '/^\s*$/d' | wc -l
 
 cd finetuning_and_classification/
 
+# change to env (if not yet done)
+module load anaconda
+module load cuda
+source activate ada
+
+# open a screen session, because this will take a while
+screen -S lmfine
+
 # prepare the finetuning corpus
 python pregenerate_training_data.py --train_corpus ../data/transformed/copewe10m.txt --bert_model bert-base-uncased --do_lower_case --output_dir copewe10m_prepared/ --epochs_to_generate 3 --max_seq_len 256
 
