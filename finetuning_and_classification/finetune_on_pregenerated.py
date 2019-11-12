@@ -1,23 +1,20 @@
-from argparse import ArgumentParser
-from pathlib import Path
-import os
-import torch
-import logging
 import json
+import logging
+import os
 import random
-import numpy as np
+from argparse import ArgumentParser
 from collections import namedtuple
+from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import numpy as np
+import torch
+from pytorch_transformers.modeling_bert import BertForPreTraining
+from pytorch_transformers.optimization import AdamW, WarmupLinearSchedule
+from pytorch_transformers.tokenization_bert import BertTokenizer
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
-
-from pytorch_transformers import WEIGHTS_NAME, CONFIG_NAME
-from pytorch_transformers.modeling_bert import BertForPreTraining
-from pytorch_transformers.tokenization_bert import BertTokenizer
-from pytorch_transformers.optimization import AdamW, WarmupLinearSchedule
-
 
 InputFeatures = namedtuple("InputFeatures", "input_ids input_mask segment_ids lm_label_ids is_next")
 
@@ -175,7 +172,6 @@ def main():
                         help="random seed for initialization")
     args = parser.parse_args()
 
-
     assert args.pregenerated_data.is_dir(), \
         "--pregenerated_data should point to the folder of files made by pregenerate_training_data.py!"
 
@@ -199,12 +195,14 @@ def main():
     if args.local_rank == -1 or args.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
         n_gpu = torch.cuda.device_count()
+        is_distributed_computing = False
     else:
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
         n_gpu = 1
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         torch.distributed.init_process_group(backend='nccl')
+        is_distributed_computing = True
     logging.info("device: {} n_gpu: {}, distributed training: {}, 16-bits training: {}".format(
         device, n_gpu, bool(args.local_rank != -1), args.fp16))
 
@@ -241,6 +239,7 @@ def main():
     if args.fp16:
         model.half()
     model.to(device)
+    is_dataparallel = False
     if args.local_rank != -1:
         try:
             from apex.parallel import DistributedDataParallel as DDP
@@ -249,6 +248,7 @@ def main():
                 "Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
         model = DDP(model)
     elif n_gpu > 1:
+        is_dataparallel = True
         model = torch.nn.DataParallel(model)
 
     # Prepare optimizer
@@ -285,7 +285,6 @@ def main():
     logging.info(f"  Num examples = {total_train_examples}")
     logging.info("  Batch size = %d", args.train_batch_size)
     logging.info("  Num steps = %d", num_train_optimization_steps)
-
 
     model.train()
     log_step = 50
@@ -353,18 +352,38 @@ def main():
                     with open(output_lossfile_20000, "a") as f:
                         f.write("{}\n".format(avg_loss))
                     tmp_tr_loss = 0
+
                     # Save a checkpoint model
-                    if n_gpu > 1 and torch.distributed.get_rank() == 0 or n_gpu <= 1:
+                    is_correct_rank = True
+                    if is_distributed_computing:
+                        if torch.distributed.get_rank() == 0:
+                            pass
+                        else:
+                            is_correct_rank = False
+
+                    if n_gpu <= 1 or n_gpu > 1 and is_correct_rank:
                         logging.info("** ** * Saving fine-tuned model checkpoint ** ** * ")
                         save_checkpoint_dir = Path(f'{args.output_dir}/ep{epoch}_{nb_tr_examples}/')
                         save_checkpoint_dir.mkdir(parents=True, exist_ok=True)
-                        model.save_pretrained(save_checkpoint_dir)
+                        if is_dataparallel:
+                            model.module.save_pretrained(save_checkpoint_dir)
+                        else:
+                            model.save_pretrained(save_checkpoint_dir)
                         tokenizer.save_pretrained(save_checkpoint_dir)
 
     # Save a trained model
-    if n_gpu > 1 and torch.distributed.get_rank() == 0 or n_gpu <= 1:
+    is_correct_rank = True
+    if is_distributed_computing:
+        if torch.distributed.get_rank() == 0:
+            pass
+        else:
+            is_correct_rank = False
+    if n_gpu <= 1 or n_gpu > 1 and is_correct_rank:
         logging.info("** ** * Saving fine-tuned model ** ** * ")
-        model.save_pretrained(args.output_dir)
+        if is_dataparallel:
+            model.module.save_pretrained(args.output_dir)
+        else:
+            model.save_pretrained(args.output_dir)
         tokenizer.save_pretrained(args.output_dir)
 
 
