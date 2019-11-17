@@ -1,15 +1,16 @@
-from argparse import ArgumentParser
-from pathlib import Path
-from tqdm import tqdm, trange
-from tempfile import TemporaryDirectory
-import shelve
-from multiprocessing import Pool
-
-from random import random, randrange, randint, shuffle, choice
-from pytorch_transformers.tokenization_bert import BertTokenizer
-import numpy as np
-import json
 import collections
+import json
+import shelve
+from argparse import ArgumentParser
+from multiprocessing import Pool
+from pathlib import Path
+from random import random, randrange, randint, shuffle, choice
+from tempfile import TemporaryDirectory
+
+import numpy as np
+from pytorch_transformers.tokenization_bert import BertTokenizer
+from tqdm import tqdm, trange
+
 
 class DocumentDatabase:
     def __init__(self, reduce_memory=False):
@@ -99,8 +100,10 @@ def truncate_seq_pair(tokens_a, tokens_b, max_num_tokens):
         else:
             trunc_tokens.pop()
 
+
 MaskedLmInstance = collections.namedtuple("MaskedLmInstance",
                                           ["index", "label"])
+
 
 def create_masked_lm_predictions(tokens, masked_lm_prob, max_predictions_per_seq, whole_word_mask, vocab_list):
     """Creates the predictions for the masked LM objective. This is mostly copied from the Google BERT repo, but
@@ -198,6 +201,7 @@ def create_instances_from_document(
     current_chunk = []
     current_length = 0
     i = 0
+    count_len_insufficient = 0
     while i < len(document):
         segment = document[i]
         current_chunk.append(segment)
@@ -240,27 +244,31 @@ def create_instances_from_document(
                         tokens_b.extend(current_chunk[j])
                 truncate_seq_pair(tokens_a, tokens_b, max_num_tokens)
 
-                assert len(tokens_a) >= 1
-                assert len(tokens_b) >= 1
+                if len(tokens_a) >= 1 and len(tokens_b) >= 1:
+                    tokens = ["[CLS]"] + tokens_a + ["[SEP]"] + tokens_b + ["[SEP]"]
+                    # The segment IDs are 0 for the [CLS] token, the A tokens and the first [SEP]
+                    # They are 1 for the B tokens and the final [SEP]
+                    segment_ids = [0 for _ in range(len(tokens_a) + 2)] + [1 for _ in range(len(tokens_b) + 1)]
 
-                tokens = ["[CLS]"] + tokens_a + ["[SEP]"] + tokens_b + ["[SEP]"]
-                # The segment IDs are 0 for the [CLS] token, the A tokens and the first [SEP]
-                # They are 1 for the B tokens and the final [SEP]
-                segment_ids = [0 for _ in range(len(tokens_a) + 2)] + [1 for _ in range(len(tokens_b) + 1)]
+                    tokens, masked_lm_positions, masked_lm_labels = create_masked_lm_predictions(
+                        tokens, masked_lm_prob, max_predictions_per_seq, whole_word_mask, vocab_list)
 
-                tokens, masked_lm_positions, masked_lm_labels = create_masked_lm_predictions(
-                    tokens, masked_lm_prob, max_predictions_per_seq, whole_word_mask, vocab_list)
+                    instance = {
+                        "tokens": tokens,
+                        "segment_ids": segment_ids,
+                        "is_random_next": is_random_next,
+                        "masked_lm_positions": masked_lm_positions,
+                        "masked_lm_labels": masked_lm_labels}
+                    instances.append(instance)
+                else:
+                    count_len_insufficient += 1
 
-                instance = {
-                    "tokens": tokens,
-                    "segment_ids": segment_ids,
-                    "is_random_next": is_random_next,
-                    "masked_lm_positions": masked_lm_positions,
-                    "masked_lm_labels": masked_lm_labels}
-                instances.append(instance)
             current_chunk = []
             current_length = 0
         i += 1
+
+    print(f"length insufficient: {count_len_insufficient}")
+    print(f"i: {i}")
 
     return instances
 
@@ -313,6 +321,27 @@ def main():
                         help="Maximum number of tokens to mask in each sequence")
 
     args = parser.parse_args()
+
+    if args.num_workers > 1:
+        import sys
+        print("""do not use num_workers because: 
+        Traceback (most recent call last):
+  File "pregenerate_training_data.py", line 362, in <module>
+    main()
+  File "pregenerate_training_data.py", line 355, in main
+    writer_workers.starmap(create_training_file, arguments)
+  File "/home/scc/fhamborg/.conda/envs/ada/lib/python3.7/multiprocessing/pool.py", line 276, in starmap
+    return self._map_async(func, iterable, starmapstar, chunksize).get()
+  File "/home/scc/fhamborg/.conda/envs/ada/lib/python3.7/multiprocessing/pool.py", line 657, in get
+    raise self._value
+  File "/home/scc/fhamborg/.conda/envs/ada/lib/python3.7/multiprocessing/pool.py", line 431, in _handle_tasks
+    put(task)
+  File "/home/scc/fhamborg/.conda/envs/ada/lib/python3.7/multiprocessing/connection.py", line 206, in send
+    self._send_bytes(_ForkingPickler.dumps(obj))
+  File "/home/scc/fhamborg/.conda/envs/ada/lib/python3.7/multiprocessing/connection.py", line 393, in _send_bytes
+    header = struct.pack("!i", n)
+struct.error: 'i' format requires -2147483648 <= number <= 2147483647""")
+        sys.exit(0)
 
     if args.num_workers > 1 and args.reduce_memory:
         raise ValueError("Cannot use multiple workers while reducing memory")

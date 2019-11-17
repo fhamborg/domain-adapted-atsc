@@ -38,5 +38,5 @@ screen -S lmfine
 python pregenerate_training_data.py --train_corpus ../data/transformed/copewe10m.txt --bert_model bert-base-uncased --do_lower_case --output_dir copewe10m_prepared/ --epochs_to_generate 3 --max_seq_len 256
 
 # run the finetuning
-python finetune_on_pregenerated.py --pregenerated_data copewe_prepared --bert_model bert-base-uncased --do_lower_case --output_dir copewe_finetuned/ --epochs 3 --train_batch_size 16
+python finetune_on_pregenerated.py --pregenerated_data copewe10m_prepared --bert_model bert-base-uncased --do_lower_case --output_dir copewe10m_finetuned/ --epochs 3 --train_batch_size 16
 ```
